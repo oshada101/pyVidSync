@@ -21,26 +21,37 @@ class PartyKitClient:
         scheme = "ws" if is_local else "wss"
         uri = f"{scheme}://{self.host}/parties/main/{self.room_id}"
         print(f"[PartyKit] Connecting to: {uri}")
-        
-        self.ws = await websockets.connect(uri)
-        print(f"[PartyKit] Connected to room: {self.room_id}")
-        
-        if self.on_connect_callback:
-            self.on_connect_callback()
-        
-        await self._receive_messages()
-    
+
+        while True:
+            try:
+                async with websockets.connect(
+                    uri,
+                    ping_interval=20,
+                    ping_timeout=60,
+                    close_timeout=5,
+                ) as ws:
+                    self.ws = ws
+                    print(f"[PartyKit] Connected to room: {self.room_id}")
+                    if self.on_connect_callback:
+                        self.on_connect_callback()
+                    await self._receive_messages()
+            except Exception as e:
+                print(f"[PartyKit] Disconnected: {e} — retrying in 3s")
+                self.ws = None
+                await asyncio.sleep(3)
+
     async def _receive_messages(self):
         try:
             async for message in self.ws:
                 data = json.loads(message)
                 print(f"[PartyKit] Received: {data}")
-                
                 if self.on_message_callback:
                     self.on_message_callback(data)
-                    
+        except websockets.exceptions.ConnectionClosedOK:
+            pass
         except Exception as e:
             print(f"[PartyKit] Error: {e}")
+            raise
     
     async def send(self, message: dict):
         if self.ws:
