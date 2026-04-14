@@ -1,4 +1,21 @@
 import sys
+import os
+
+# Fix for PyInstaller + python-vlc: reset DLL search path before importing vlc
+if getattr(sys, 'frozen', False):
+    import ctypes
+    try:
+        ctypes.windll.kernel32.SetDllDirectoryW(None)
+    except Exception:
+        pass
+    if hasattr(sys, '_MEIPASS'):
+        try:
+            os.add_dll_directory(sys._MEIPASS)
+            os.environ['VLC_PLUGIN_PATH'] = os.path.join(sys._MEIPASS, 'vlc_plugins')
+        except Exception:
+            pass
+    os.environ['PATH'] = getattr(sys, '_MEIPASS', '') + os.pathsep + os.environ.get('PATH', '')
+
 import asyncio
 import json
 import time
