@@ -4,10 +4,11 @@ import os
 vlc_dir = os.environ.get('VLC_DIR', r'C:\Program Files\VideoLAN\VLC')
 vlc_plugins_dir = os.path.join(vlc_dir, 'plugins')
 
+_vlc_dlls = ['libvlc.dll', 'libvlccore.dll', 'axvlc.dll']
 binaries = [
-    (os.path.join(vlc_dir, 'libvlc.dll'), '.'),
-    (os.path.join(vlc_dir, 'libvlccore.dll'), '.'),
-    (os.path.join(vlc_dir, 'axvlc.dll'), '.'),
+    (os.path.join(vlc_dir, dll), '.')
+    for dll in _vlc_dlls
+    if os.path.exists(os.path.join(vlc_dir, dll))
 ]
 
 datas = [
