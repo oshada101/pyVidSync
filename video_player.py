@@ -62,6 +62,20 @@ class TitleBar(QWidget):
         title = QLabel("Video Sync")
         title.setObjectName("titleLabel")
         layout.addWidget(title)
+
+        self._room_code_label = QLabel("")
+        self._room_code_label.setObjectName("roomCodeLabel")
+        self._room_code_label.hide()
+        layout.addWidget(self._room_code_label)
+
+        self._copy_code_btn = QPushButton("⎘")
+        self._copy_code_btn.setObjectName("titleBarBtn")
+        self._copy_code_btn.setFixedSize(24, 24)
+        self._copy_code_btn.setToolTip("Copy room code")
+        self._copy_code_btn.hide()
+        self._copy_code_btn.clicked.connect(self._on_copy_room_code)
+        layout.addWidget(self._copy_code_btn)
+
         layout.addStretch()
 
         self.optionsButton = QPushButton("⚙")
@@ -89,6 +103,9 @@ class TitleBar(QWidget):
 
         for btn in [self.optionsButton, self.minButton, self.maxButton, self.closeButton]:
             layout.addWidget(btn)
+
+    def _on_copy_room_code(self):
+        QApplication.clipboard().setText(self._room_code_label.text())
 
     def _show_menu(self):
         pos = self.optionsButton.mapToGlobal(self.optionsButton.rect().bottomLeft())
@@ -255,6 +272,17 @@ class VideoPlayerWindow(QMainWindow):
                 font-weight: 600;
                 font-size: 13px;
                 background: transparent;
+            }
+            #roomCodeLabel {
+                color: #7c3aed;
+                font-family: monospace;
+                font-size: 12px;
+                font-weight: 600;
+                background: #1a1a1a;
+                border: 1px solid #2a2a2a;
+                border-radius: 4px;
+                padding: 2px 8px;
+                margin-left: 8px;
             }
             #titleBarBtn {
                 background-color: transparent;
@@ -564,6 +592,11 @@ class VideoPlayerWindow(QMainWindow):
 
     def is_playing(self):
         return self._is_playing
+
+    def set_room_code(self, code: str):
+        self.titleBar._room_code_label.setText(code)
+        self.titleBar._room_code_label.show()
+        self.titleBar._copy_code_btn.show()
 
     def set_viewer_mode(self):
         self.playButton.setEnabled(False)
