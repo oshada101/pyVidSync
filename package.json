@@ -1,0 +1,9 @@
+{
+  "name": "python-sync-server",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "partysocket": "latest",
+    "partykit": "latest"
+  }
+}
