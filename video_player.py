@@ -72,6 +72,8 @@ class TitleBar(QWidget):
         self._copy_code_btn.setToolTip("Copy room code")
         self._copy_code_btn.hide()
         self._copy_code_btn.clicked.connect(self._on_copy_room_code)
+        self._copy_feedback_timer = QTimer()
+        self._copy_feedback_timer.timeout.connect(self._reset_copy_btn)
         layout.addWidget(self._copy_code_btn)
 
         layout.addStretch()
@@ -103,7 +105,18 @@ class TitleBar(QWidget):
             layout.addWidget(btn)
 
     def _on_copy_room_code(self):
-        QApplication.clipboard().setText(self._room_code_label.text())
+        code = self._room_code_label.text()
+        if not code:
+            return
+        QApplication.clipboard().setText(code)
+        self._copy_code_btn.setText("✓")
+        self._copy_code_btn.setStyleSheet("color: #22c55e;")
+        self._copy_feedback_timer.start(1500)
+
+    def _reset_copy_btn(self):
+        self._copy_feedback_timer.stop()
+        self._copy_code_btn.setText("⎘")
+        self._copy_code_btn.setStyleSheet("")
 
     def _show_menu(self):
         pos = self.optionsButton.mapToGlobal(self.optionsButton.rect().bottomLeft())
@@ -146,6 +159,7 @@ class VideoPlayerWindow(QMainWindow):
     seekRequested = pyqtSignal(float)
     positionChanged = pyqtSignal(float)
     stateChanged = pyqtSignal(str)
+    fileLoaded = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -157,6 +171,7 @@ class VideoPlayerWindow(QMainWindow):
 
         self._is_fullscreen = False
         self._intended_playing = False
+        self._loaded_file = None
         self._vlc = vlc.Instance()
         self._player = self._vlc.media_player_new()
 
@@ -403,13 +418,18 @@ class VideoPlayerWindow(QMainWindow):
             self._load_video(filePath)
 
     def _load_video(self, file_path):
+        self._loaded_file = file_path
         media = self._vlc.media_new(file_path)
         self._player.set_media(media)
-        self._player.set_xwindow(int(self.videoFrame.winId()))
+        if sys.platform == "win32":
+            self._player.set_hwnd(int(self.videoFrame.winId()))
+        else:
+            self._player.set_xwindow(int(self.videoFrame.winId()))
         duration_ms = self._get_duration_ms()
         self.positionSlider.setRange(0, max(1, duration_ms))
         self.statusLabel.setText(f"Loaded: {file_path.split('/')[-1]}")
         print(f"[VideoPlayer] Loaded: {file_path}")
+        self.fileLoaded.emit()
         self.play()
 
     def _get_duration_ms(self):
@@ -426,7 +446,7 @@ class VideoPlayerWindow(QMainWindow):
             self.positionSlider.setRange(0, dur_ms)
 
         if not self.positionSlider._dragging:
-            self.positionSlider.setValue(pos_ms)
+            self.positionSlider.setValue(max(0, min(pos_ms, self.positionSlider.maximum())))
 
         self.timeLabel.setText(self._format_time(pos_ms / 1000))
         self.positionChanged.emit(pos_ms / 1000)
@@ -507,6 +527,18 @@ class VideoPlayerWindow(QMainWindow):
         self.positionSlider.setEnabled(True)
         self.modeLabel.hide()
 
+    def update_host_status(self, filename: str, state: str, video_time: float):
+        name = filename or "unknown file"
+        mins = int(video_time // 60)
+        secs = int(video_time % 60)
+        time_str = f"{mins:02d}:{secs:02d}"
+        state_str = "Playing" if state == "playing" else "Paused"
+        self.statusLabel.setText(f"Host: {name}  ·  {time_str}  ·  {state_str}")
+        self.statusLabel.setStyleSheet(
+            "background-color: #111111; color: #cccccc; font-size: 11px; padding: 4px 12px;"
+        )
+        self.modeLabel.setText(f"Viewer mode  ·  host is {state_str.lower()}")
+
     def show_warning(self, text: str):
         self.statusLabel.setText(text)
         self.statusLabel.setStyleSheet(
@@ -537,7 +569,7 @@ class VideoPlayerWindow(QMainWindow):
             self.titleBar.show()
             self.controlsWidget.show()
             self.statusLabel.show()
-            if not self.playButton.isEnabled():
+            if not self.playPauseButton.isEnabled():
                 self.modeLabel.show()
             self._is_fullscreen = False
             self.fullscreenButton.setText("⛶")
@@ -576,7 +608,31 @@ class VideoPlayerWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._poll_timer.stop()
-        self._player.stop()
+        self._hide_controls_timer.stop()
+        QApplication.instance().removeEventFilter(self)
+        if self._player:
+            if sys.platform != "win32":
+                try:
+                    self._player.set_xwindow(0)
+                except Exception:
+                    pass
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+            try:
+                self._player.set_media(None)
+            except Exception:
+                pass
+            try:
+                self._player.release()
+            except Exception:
+                pass
+        if self._vlc:
+            try:
+                self._vlc.release()
+            except Exception:
+                pass
         super().closeEvent(event)
 
 

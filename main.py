@@ -1,6 +1,8 @@
 import sys
 import os
 
+os.environ["LIBPLACEBO_CPU"] = "1"
+
 # Fix for PyInstaller + python-vlc: reset DLL search path before importing vlc
 if getattr(sys, 'frozen', False):
     import ctypes
@@ -168,15 +170,15 @@ class RoleSelectDialog(QDialog):
         code_label.setStyleSheet("color: #7c3aed; letter-spacing: 4px;")
         self._host_code_label = code_label
 
-        copy_btn = QPushButton("⎘")
-        copy_btn.setObjectName("copyBtn")
-        copy_btn.setFixedSize(30, 30)
-        copy_btn.setToolTip("Copy room code")
-        copy_btn.clicked.connect(self._copy_code)
+        self._copy_btn = QPushButton("⎘")
+        self._copy_btn.setObjectName("copyBtn")
+        self._copy_btn.setFixedSize(30, 30)
+        self._copy_btn.setToolTip("Copy room code")
+        self._copy_btn.clicked.connect(self._copy_code)
 
         code_row_layout.addStretch()
         code_row_layout.addWidget(code_label)
-        code_row_layout.addWidget(copy_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        code_row_layout.addWidget(self._copy_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         code_row_layout.addStretch()
 
         instruction = QLabel("Share this code with viewers")
@@ -248,6 +250,13 @@ class RoleSelectDialog(QDialog):
 
     def _copy_code(self):
         QApplication.clipboard().setText(self._generated_code)
+        self._copy_btn.setText("✓")
+        self._copy_btn.setStyleSheet("color: #22c55e; border-color: #22c55e;")
+        QTimer.singleShot(1500, self._reset_copy_btn)
+
+    def _reset_copy_btn(self):
+        self._copy_btn.setText("⎘")
+        self._copy_btn.setStyleSheet("")
 
     def _accept_host(self):
         self.role = "host"
@@ -265,7 +274,7 @@ class RoleSelectDialog(QDialog):
         self.accept()
 
     def closeEvent(self, event):
-        sys.exit(0)
+        event.accept()
 
 
 class _SyncBridge(QObject):
@@ -289,6 +298,7 @@ class SyncApp:
         self._last_heartbeat_time = time.time()
         self._host_disconnect_warned = False
         self._peers: list[str] = []
+        self._last_sync: dict | None = None
 
     def start(self, app: QApplication):
         self._app = app
@@ -340,6 +350,7 @@ class SyncApp:
         self.video_player.pauseRequested.connect(self._on_pause)
         self.video_player.seekRequested.connect(self._on_seek)
         self.video_player.positionChanged.connect(self._on_position_changed)
+        self.video_player.fileLoaded.connect(self._on_file_loaded)
 
     def _setup_peer_callbacks(self):
         def on_message(data):
@@ -361,6 +372,7 @@ class SyncApp:
                     self._peers.append(peer)
                 if self.role == "host":
                     print(f"[Sync] Viewer joined: {peer}  (peers: {self._peers})")
+                    self._send_sync_state()
             elif msg_type == "peer_left":
                 peer = data.get("peerId")
                 if peer in self._peers:
@@ -398,6 +410,10 @@ class SyncApp:
     def _on_position_changed(self, position):
         pass
 
+    def _on_file_loaded(self):
+        if self.role == "viewer" and self._last_sync:
+            QTimer.singleShot(300, lambda: self._do_apply_sync(self._last_sync))
+
     async def _heartbeat_loop(self):
         while self.role == "host":
             if self.party_client.ws:
@@ -417,11 +433,17 @@ class SyncApp:
         if not hasattr(self.party_client, 'ws') or not self.party_client.ws:
             return
 
+        if self.video_player._loaded_file is None:
+            return
+        current_time = self.video_player.get_current_time()
+
+        loaded = self.video_player._loaded_file
         msg = {
             "type": "sync",
             "state": "playing" if self.video_player.is_playing() else "paused",
-            "videoTime": self.video_player.get_current_time(),
+            "videoTime": current_time,
             "wallClock": time.time(),
+            "filename": os.path.basename(loaded) if loaded else "",
         }
 
         if self._loop:
@@ -459,16 +481,22 @@ class SyncApp:
         self._bridge.sync_ready.emit(msg)
 
     def _do_apply_sync(self, msg):
+        self._last_sync = msg
         latency = time.time() - msg["wallClock"]
         video_time = msg["videoTime"] + (latency if msg["state"] == "playing" else 0)
 
         self._applying_sync = True
-        self.video_player.seek_to(video_time)
         if msg["state"] == "playing":
             self.video_player.play()
+            self.video_player.seek_to(video_time)
         else:
+            self.video_player.seek_to(video_time)
             self.video_player.pause()
         self._applying_sync = False
+
+        self.video_player.update_host_status(
+            msg.get("filename", ""), msg["state"], msg["videoTime"]
+        )
 
 
 def main():
@@ -482,9 +510,16 @@ def main():
     sync_app.start(app)
 
     try:
-        sys.exit(app.exec())
+        ret = app.exec()
     except KeyboardInterrupt:
-        pass
+        ret = 0
+
+    if sync_app.video_player:
+        sync_app.video_player.close()
+    if sync_app.party_client and sync_app._loop:
+        sync_app._loop.call_soon_threadsafe(sync_app._loop.stop)
+
+    sys.exit(ret)
 
 
 if __name__ == "__main__":

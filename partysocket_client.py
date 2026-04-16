@@ -2,16 +2,21 @@ import asyncio
 import json
 import websockets
 import os
+import sys
 import ssl
 from dotenv import load_dotenv
 
-load_dotenv()
+if not getattr(sys, 'frozen', False):
+    load_dotenv()
 
 
 class PartyKitClient:
     def __init__(self, room_id: str = "video-sync"):
         self.room_id = room_id
-        self.host = os.environ.get("PARTYKIT_HOST")
+        if getattr(sys, 'frozen', False):
+            self.host = "python-sync-server.eastcoast.partykit.dev"
+        else:
+            self.host = os.environ.get("PARTYKIT_HOST")
         self.ws = None
         self.on_message_callback = None
         self.on_connect_callback = None
