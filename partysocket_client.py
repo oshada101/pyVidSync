@@ -5,6 +5,7 @@ import os
 import sys
 import ssl
 from dotenv import load_dotenv
+from settings import resolve_host
 
 if not getattr(sys, 'frozen', False):
     load_dotenv()
@@ -13,15 +14,14 @@ if not getattr(sys, 'frozen', False):
 class PartyKitClient:
     def __init__(self, room_id: str = "video-sync"):
         self.room_id = room_id
-        if getattr(sys, 'frozen', False):
-            self.host = "python-sync-server.eastcoast.partykit.dev"
-        else:
-            self.host = os.environ.get("PARTYKIT_HOST")
+        self.host = resolve_host()
         self.ws = None
         self.on_message_callback = None
         self.on_connect_callback = None
     
     async def connect(self):
+        if not self.host:
+            raise RuntimeError("PartyKit host not configured. Set it in Settings or via PARTYKIT_HOST env var.")
         is_local = self.host in ("localhost:1999", "127.0.0.1:1999")
         scheme = "ws" if is_local else "wss"
         uri = f"{scheme}://{self.host}/parties/main/{self.room_id}"

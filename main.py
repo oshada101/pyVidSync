@@ -30,8 +30,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QFont
+import json
 from video_player import VideoPlayerWindow
 from partysocket_client import PartyKitClient
+from settings import load_settings, save_settings, get_settings_path
 
 _DARK_STYLE = """
 QDialog {
@@ -122,17 +124,25 @@ class RoleSelectDialog(QDialog):
         self._choice_widget = self._build_choice()
         self._host_widget = self._build_host_panel()
         self._viewer_widget = self._build_viewer_panel()
+        self._settings_widget = self._build_settings_panel()
 
         self._root.addWidget(self._choice_widget)
         self._root.addWidget(self._host_widget)
         self._root.addWidget(self._viewer_widget)
+        self._root.addWidget(self._settings_widget)
 
         self._host_widget.hide()
         self._viewer_widget.hide()
+        self._settings_widget.hide()
 
     def _build_choice(self):
         w = QWidget()
-        layout = QHBoxLayout(w)
+        outer = QVBoxLayout(w)
+        outer.setSpacing(12)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        btn_row = QWidget()
+        layout = QHBoxLayout(btn_row)
         layout.setSpacing(16)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -149,6 +159,16 @@ class RoleSelectDialog(QDialog):
 
         layout.addWidget(host_btn)
         layout.addWidget(viewer_btn)
+
+        settings_btn = QPushButton("⚙ Settings")
+        settings_btn.setStyleSheet(
+            "background: transparent; color: #555555; font-size: 12px; border: none; padding: 0;"
+        )
+        settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_btn.clicked.connect(self._show_settings)
+
+        outer.addWidget(btn_row)
+        outer.addWidget(settings_btn, 0, Qt.AlignmentFlag.AlignRight)
         return w
 
     def _build_host_panel(self):
@@ -229,22 +249,79 @@ class RoleSelectDialog(QDialog):
         layout.addWidget(back_btn)
         return w
 
+    def _build_settings_panel(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        label = QLabel("PartyKit Host")
+        label.setStyleSheet("color: #888888; font-size: 12px;")
+
+        self._host_input = QLineEdit()
+        self._host_input.setPlaceholderText("e.g. myserver.partykit.dev")
+        self._host_input.setText(load_settings().get("partykit_host", ""))
+        self._host_input.setMinimumHeight(44)
+
+        self._settings_status = QLabel("")
+        self._settings_status.setStyleSheet("color: #22c55e; font-size: 12px;")
+        self._settings_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._settings_status.hide()
+
+        save_btn = QPushButton("Save")
+        save_btn.setObjectName("accent")
+        save_btn.setMinimumHeight(44)
+        save_btn.clicked.connect(self._save_settings_ui)
+
+        back_btn = QPushButton("Back")
+        back_btn.clicked.connect(self._show_choice)
+
+        layout.addWidget(label)
+        layout.addWidget(self._host_input)
+        layout.addWidget(self._settings_status)
+        layout.addWidget(save_btn)
+        layout.addWidget(back_btn)
+        return w
+
+    def _save_settings_ui(self):
+        host = self._host_input.text().strip()
+        if host:
+            save_settings({"partykit_host": host})
+        else:
+            data = load_settings()
+            data.pop("partykit_host", None)
+            with open(get_settings_path(), "w") as f:
+                json.dump(data, f, indent=2)
+        self._settings_status.setText("Saved")
+        self._settings_status.show()
+        QTimer.singleShot(2000, self._settings_status.hide)
+
+    def _show_settings(self):
+        self._choice_widget.hide()
+        self._host_widget.hide()
+        self._viewer_widget.hide()
+        self._settings_widget.show()
+        self.adjustSize()
+
     def _show_choice(self):
         self._choice_widget.show()
         self._host_widget.hide()
         self._viewer_widget.hide()
+        self._settings_widget.hide()
         self.adjustSize()
 
     def _show_host(self):
         self._choice_widget.hide()
         self._host_widget.show()
         self._viewer_widget.hide()
+        self._settings_widget.hide()
         self.adjustSize()
 
     def _show_viewer(self):
         self._choice_widget.hide()
         self._host_widget.hide()
         self._viewer_widget.show()
+        self._settings_widget.hide()
         self._code_input.setFocus()
         self.adjustSize()
 
