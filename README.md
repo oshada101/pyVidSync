@@ -1,28 +1,28 @@
 # Python Video Player with PartyKit Sync
 
-A Python video player with real-time sync to browsers via PartyKit WebSocket server.
+A synchronized video player. All participants run the same Python app — host controls playback, viewers follow.
 
 ## Features
 
 - Play video files (MP4, MKV, AVI, MOV, WebM)
-- Audio playback via pygame
-- Real-time sync with connected browsers
-- Send play/pause/seek commands from browser to Python
-- Cloud deployment for remote connections
+- Real-time sync across all participants
+- Host/viewer roles with room codes
+- Host transfer support
 
 ## Project Structure
 
 ```
 python-player/
-├── main.py              # Main app (video player + PartyKit client)
-├── video_player.py      # OpenCV-based video player with pygame audio
-├── partysocket_client.py # WebSocket client for PartyKit
-├── requirements.txt     # Python dependencies
+├── main.py                # Main app + UI (role select, sync logic)
+├── video_player.py        # VLC-based video player (PyQt6)
+├── partysocket_client.py  # WebSocket client for PartyKit
+├── settings.py            # Settings load/save (settings.json)
+├── requirements.txt       # Python dependencies
 ├── party/
-│   └── server.ts        # PartyKit server (broadcasts messages)
+│   └── server.ts          # PartyKit server
 ├── public/
-│   └── index.html       # Web viewer UI
-└── partykit.json        # PartyKit configuration
+│   └── index.html         # Web viewer UI
+└── partykit.json          # PartyKit configuration
 ```
 
 ## Quick Start (Local)
@@ -30,92 +30,77 @@ python-player/
 ### 1. Start PartyKit Server
 
 ```bash
-cd python-player
 npx partykit dev --port 1999
 ```
 
-### 2. Run Python Video Player
+### 2. Configure Host
 
-```bash
-cd python-player
-python3 main.py
+Set `PARTYKIT_HOST` in `.env`:
+
+```
+PARTYKIT_HOST=localhost:1999
 ```
 
-### 3. Test Locally
+Or set it in the app UI: launch `main.py` → Settings → PartyKit Host.
 
-Open browser to: http://localhost:1999
+### 3. Run
+
+```bash
+python3 main.py
+```
 
 ## Deploy to Cloud
 
 ### 1. Deploy PartyKit Server
 
 ```bash
-cd python-player
 npx partykit deploy
 ```
 
-This gives you a URL like: `https://python-sync-server.eastcoast.partykit.dev`
+Note the host from the output (e.g. `yourapp.partykit.dev`).
 
-### 2. Update Python Client (if needed)
+### 2. Configure the Host
 
-The client is already configured to use the cloud URL:
-- Default: `python-sync-server.eastcoast.partykit.dev`
-- Override with environment variable: `PARTYKIT_HOST=your-host.partykit.dev`
-
-### 3. Run Python
-
-```bash
-python3 main.py
+**Via `.env`** (dev):
+```
+PARTYKIT_HOST=yourapp.partykit.dev
 ```
 
-### 4. Share with Others
+**Via UI** (dev or frozen app): launch → Settings → PartyKit Host → Save.
 
-Send them the URL: `https://python-sync-server.eastcoast.partykit.dev`
+**Via `settings.json`** next to the executable (frozen app):
+```json
+{ "partykit_host": "yourapp.partykit.dev" }
+```
 
-They can view the sync status and send play/pause/seek commands back to control your video.
+**Via environment variable** (any mode):
+```bash
+PARTYKIT_HOST=yourapp.partykit.dev python3 main.py
+```
+
+Priority: env var → `settings.json` → UI-saved setting.
 
 ## How It Works
 
-1. **Python** runs as the video host, connects to PartyKit WebSocket
-2. **PartyKit** broadcasts messages to all connected browsers
-3. **Browser** receives sync messages (videoTime, state, duration)
-4. **Browser** can send commands back (play, pause, seek)
+1. Host generates a room code and shares it out-of-band.
+2. Viewers enter the code to join the room.
+3. Host controls playback; sync messages broadcast to all viewers via PartyKit.
+4. Each participant has a local copy of the video file.
 
-### Message Format
+### Sync messages (host → viewers)
 
-**From Python (sync state):**
 ```json
-{
-  "type": "sync",
-  "videoTime": 12.5,
-  "duration": 120.0,
-  "state": "playing",
-  "timestamp": 1776122400.0
-}
+{ "type": "sync", "state": "playing", "videoTime": 12.5, "wallClock": 1234567890.0 }
 ```
 
-**From Browser (commands):**
-```json
-{"type": "play"}
-{"type": "pause"}
-{"type": "seek", "timestamp": 10}
-```
+Viewer compensates for latency using `wallClock` delta before seeking.
+
+### Heartbeat
+
+Host sends a heartbeat every 1s. Viewers show a warning after 3s silence. Earliest-joined viewer auto-promotes to host on disconnect.
 
 ## Dependencies
 
-- Python 3.10+
-- PyQt6 (optional, not used - using OpenCV)
-- opencv-python
-- pygame
-- websockets
-- ffmpeg (for audio extraction)
-
-Install:
 ```bash
-pip install opencv-python pygame websockets PyQt6
+pip install PyQt6 python-vlc websockets python-dotenv
 ```
-
-## Room Configuration
-
-- Default room: `video-sync`
-- Override with: `PARTYKIT_ROOM=your-room-name` (and update `main.py`)
