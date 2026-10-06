@@ -1,0 +1,5 @@
+# Optional TLS (wss://) in front of the relay. Point the domain's A record at the VPS,
+# open ports 80 and 443, and Caddy fetches and renews the certificate automatically.
+sync.example.com {
+	reverse_proxy 127.0.0.1:1999
+}

@@ -1,0 +1,20 @@
+# Install: copy to /etc/systemd/system/, then `systemctl enable --now videosync-relay`.
+# Set HOST=0.0.0.0 to expose the port directly (plain ws://) instead of behind Caddy.
+[Unit]
+Description=Video Sync relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=HOST=127.0.0.1 PORT=1999
+ExecStart=/opt/videosync/venv/bin/python /opt/videosync/relay_server.py
+Restart=on-failure
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target
