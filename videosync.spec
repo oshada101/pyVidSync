@@ -1,22 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-import glob
 import os
 
-# Defaults match Debian/Ubuntu x86_64; override with VLC_LIB_DIR / VLC_PLUGINS_DIR.
-vlc_lib_dir = os.environ.get('VLC_LIB_DIR', '/usr/lib/x86_64-linux-gnu')
-vlc_plugins_dir = os.environ.get('VLC_PLUGINS_DIR', os.path.join(vlc_lib_dir, 'vlc', 'plugins'))
-
-binaries = [
-    (lib, '.')
-    for pattern in ('libvlc.so.*', 'libvlccore.so.*')
-    for lib in glob.glob(os.path.join(vlc_lib_dir, pattern))
-]
-if not binaries:
-    raise SystemExit(f"No libvlc found in {vlc_lib_dir}; set VLC_LIB_DIR")
-
-datas = [
-    (vlc_plugins_dir, 'vlc_plugins'),
-]
+# Linux build uses the system VLC (`apt install vlc`) instead of bundling it: bundled libvlc
+# plugins link against the build distro's codec libraries and break on other distro versions.
+binaries = []
+datas = []
 
 a = Analysis(
     ['main.py'],
@@ -40,6 +28,9 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
+
+# PyInstaller auto-collects libvlc via python-vlc; drop it so the system libvlc and its plugins match.
+a.binaries = [b for b in a.binaries if not os.path.basename(b[0]).startswith(('libvlc.so', 'libvlccore.so'))]
 
 pyz = PYZ(a.pure)
 

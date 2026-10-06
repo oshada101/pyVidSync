@@ -1,0 +1,8 @@
+[Unit]
+Description=Pull Video Sync from GitHub and restart the relay if it changed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/videosync/deploy/auto-update.sh
