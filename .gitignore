@@ -7,6 +7,7 @@ __pycache__/
 node_modules/
 *.egg-info/
 dist/
+dist-linux/
 build/
 
 .venv/

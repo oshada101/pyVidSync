@@ -127,7 +127,24 @@ Accepted host values: `yourapp.partykit.dev` (wss), `localhost:1999` (ws), or an
 
 ## Building
 
+**Linux** (from any machine with Docker, including macOS):
+
 ```bash
-pyinstaller videosync.spec            # Linux (override VLC_LIB_DIR / VLC_PLUGINS_DIR if needed)
-pyinstaller videosync-windows.spec    # Windows (override VLC_DIR if VLC isn't in Program Files)
+docker build --platform linux/amd64 -f packaging/linux.Dockerfile --output dist-linux .
+```
+
+This produces `dist-linux/videosync-linux-x86_64.tar.gz`. The build doesn't bundle VLC, so the target machine needs it installed:
+
+```bash
+sudo apt install vlc            # Debian/Ubuntu; use your distro's package elsewhere
+tar xzf videosync-linux-x86_64.tar.gz
+./videosync/videosync
+```
+
+The build targets glibc 2.35, so it runs on Ubuntu 22.04+, Debian 12+ and similar. The app forces X11 (`QT_QPA_PLATFORM=xcb`) so VLC can embed into the window, which on Wayland runs through XWayland.
+
+**Windows** (on Windows with VLC installed; set `VLC_DIR` if VLC isn't in Program Files):
+
+```bash
+pyinstaller videosync-windows.spec
 ```

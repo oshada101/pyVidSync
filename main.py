@@ -3,6 +3,10 @@ import os
 import sys
 import time
 
+# VLC embeds into native X11 windows; under Wayland it would open its own window instead.
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
 # PyInstaller's bootloader changes the DLL search path, which breaks python-vlc's libvlc loading
 # (see 5273fa2). Reset it before vlc is imported; the rest of the path setup lives in rthook_vlc.py.
 if getattr(sys, 'frozen', False) and sys.platform == "win32":

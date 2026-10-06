@@ -1,0 +1,9 @@
+.git
+.venv
+node_modules
+dist
+dist-linux
+build
+**/__pycache__
+.env
+settings.json
