@@ -57,24 +57,39 @@ npm test && npm run typecheck        # server
 
 `relay_server.py` speaks the same protocol as the PartyKit server. It's a single file with one dependency and uses about 30 MB of RAM.
 
-On the VPS (Debian/Ubuntu):
+On the VPS (Debian/Ubuntu), one-time setup:
 
 ```bash
-sudo apt install -y python3-venv
-sudo mkdir -p /opt/videosync
-sudo cp relay_server.py /opt/videosync/
+sudo apt update && sudo apt install -y git python3-venv
+sudo git clone https://github.com/oshada101/pyVidSync.git /opt/videosync
 sudo python3 -m venv /opt/videosync/venv
 sudo /opt/videosync/venv/bin/pip install 'websockets>=14'
-sudo cp deploy/videosync-relay.service /etc/systemd/system/
-sudo systemctl enable --now videosync-relay
+sudo cp /opt/videosync/deploy/videosync-*.service /opt/videosync/deploy/videosync-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now videosync-relay videosync-update.timer
 ```
 
 Then choose how clients reach it:
 
-- **With a domain (wss, recommended):** install Caddy, use `deploy/Caddyfile` with your domain, and open ports 80 and 443. Clients use the host `sync.yourdomain.com`.
-- **Without a domain (plain ws):** set `HOST=0.0.0.0` in the service file and open port 1999. Clients use the host `ws://<vps-ip>:1999`. Traffic is unencrypted, so room codes and host tokens are visible on the network path.
+- **With a domain (wss, recommended):** install Caddy, use `deploy/Caddyfile` with your domain, and open ports 80 and 443 (`sudo ufw allow 80,443/tcp`). Clients use the host `sync.yourdomain.com`.
+- **Without a domain (plain ws):** expose the port with a drop-in, which survives auto-updates, and open the port:
+  ```bash
+  sudo mkdir -p /etc/systemd/system/videosync-relay.service.d
+  printf '[Service]\nEnvironment=HOST=0.0.0.0\n' | sudo tee /etc/systemd/system/videosync-relay.service.d/override.conf
+  sudo systemctl daemon-reload && sudo systemctl restart videosync-relay
+  sudo ufw allow 1999/tcp
+  ```
+  Clients use the host `ws://<vps-ip>:1999`. Traffic is unencrypted, so room codes and host tokens are visible on the network path.
 
-Logs: `journalctl -u videosync-relay -f`.
+Check it from your computer: `curl http://<vps-ip>:1999/` should print `videosync ok`.
+
+### Auto-deploy
+
+`videosync-update.timer` runs `deploy/auto-update.sh` every minute. The script pulls `main`, and if `relay_server.py` or the service file changed, it restarts the relay. A restart briefly disconnects clients; they reconnect on their own and the host gets its role back. Commits that only touch the desktop app never restart the server. The repo is public, so no deploy keys or GitHub secrets are needed.
+
+- Update logs: `journalctl -u videosync-update -f`
+- Relay logs: `journalctl -u videosync-relay -f`
+- Next check: `systemctl list-timers videosync-update.timer`
 
 ## Deploy to PartyKit (managed)
 

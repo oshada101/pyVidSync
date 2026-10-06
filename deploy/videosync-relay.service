@@ -1,5 +1,9 @@
 # Install: copy to /etc/systemd/system/, then `systemctl enable --now videosync-relay`.
-# Set HOST=0.0.0.0 to expose the port directly (plain ws://) instead of behind Caddy.
+# To expose the port directly (plain ws://, no Caddy), override HOST in a drop-in so
+# auto-updates of this file keep it:
+#   /etc/systemd/system/videosync-relay.service.d/override.conf
+#   [Service]
+#   Environment=HOST=0.0.0.0
 [Unit]
 Description=Video Sync relay server
 After=network-online.target
