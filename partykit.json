@@ -1,9 +1,5 @@
 {
   "name": "python-sync-server",
   "main": "party/server.ts",
-  "compatibilityDate": "2024-12-01",
-  "serve": {
-    "path": "public",
-    "index": "index.html"
-  }
+  "compatibilityDate": "2024-12-01"
 }
