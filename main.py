@@ -1,39 +1,37 @@
-import sys
+import logging
 import os
+import sys
+import time
 
 os.environ["LIBPLACEBO_CPU"] = "1"
 
-# Fix for PyInstaller + python-vlc: reset DLL search path before importing vlc
-if getattr(sys, 'frozen', False):
+# PyInstaller's bootloader changes the DLL search path, which breaks python-vlc's libvlc loading
+# (see 5273fa2). Reset it before vlc is imported; the rest of the path setup lives in rthook_vlc.py.
+if getattr(sys, 'frozen', False) and sys.platform == "win32":
     import ctypes
-    try:
-        ctypes.windll.kernel32.SetDllDirectoryW(None)
-    except Exception:
-        pass
-    if hasattr(sys, '_MEIPASS'):
-        try:
-            os.add_dll_directory(sys._MEIPASS)
-            os.environ['VLC_PLUGIN_PATH'] = os.path.join(sys._MEIPASS, 'vlc_plugins')
-        except Exception:
-            pass
-    os.environ['PATH'] = getattr(sys, '_MEIPASS', '') + os.pathsep + os.environ.get('PATH', '')
+    ctypes.windll.kernel32.SetDllDirectoryW(None)
 
-import asyncio
-import json
-import time
-import threading
-import random
-import string
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QWidget,
 )
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal, Qt
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot, Qt
 from PyQt6.QtGui import QFont
-import json
 from video_player import VideoPlayerWindow
 from partysocket_client import PartyKitClient
-from settings import load_settings, save_settings, get_settings_path
+from settings import load_settings, save_settings, resolve_host
+from sync_logic import (
+    SyncState, expected_position, generate_room_code, generate_token,
+    needs_correction, normalize_host, normalize_room_code, parse_sync,
+)
+
+log = logging.getLogger("sync")
+
+HEARTBEAT_INTERVAL_MS = 1000
+SILENCE_CHECK_INTERVAL_MS = 1000
+HOST_SILENCE_TIMEOUT_SEC = 3.0
+SYNC_DEBOUNCE_MS = 120  # coalesces slider drags and key-repeat seeks into one broadcast
+FILE_LOAD_SETTLE_MS = 300  # VLC ignores seeks until playback has actually started
 
 _DARK_STYLE = """
 QDialog {
@@ -91,18 +89,13 @@ QLineEdit:focus {
 """
 
 
-def _generate_room_code():
-    letters = "".join(random.choices(string.ascii_uppercase, k=3))
-    digits = "".join(random.choices(string.digits, k=3))
-    return f"{letters}-{digits}"
-
 
 class RoleSelectDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.role = None
         self.room_code = None
-        self._generated_code = _generate_room_code()
+        self._generated_code = generate_room_code()
 
         self.setWindowTitle("Video Sync")
         self.setStyleSheet(_DARK_STYLE)
@@ -125,15 +118,19 @@ class RoleSelectDialog(QDialog):
         self._host_widget = self._build_host_panel()
         self._viewer_widget = self._build_viewer_panel()
         self._settings_widget = self._build_settings_panel()
+        self._panels = (self._choice_widget, self._host_widget, self._viewer_widget, self._settings_widget)
+        for panel in self._panels:
+            self._root.addWidget(panel)
+        self._show_panel(self._choice_widget)
 
-        self._root.addWidget(self._choice_widget)
-        self._root.addWidget(self._host_widget)
-        self._root.addWidget(self._viewer_widget)
-        self._root.addWidget(self._settings_widget)
-
-        self._host_widget.hide()
-        self._viewer_widget.hide()
-        self._settings_widget.hide()
+    @staticmethod
+    def _error_label():
+        label = QLabel("")
+        label.setStyleSheet("color: #ef4444; font-size: 12px;")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setWordWrap(True)
+        label.hide()
+        return label
 
     def _build_choice(self):
         w = QWidget()
@@ -150,12 +147,12 @@ class RoleSelectDialog(QDialog):
         host_btn.setObjectName("accent")
         host_btn.setMinimumHeight(56)
         host_btn.setFont(QFont("", 15, QFont.Weight.Bold))
-        host_btn.clicked.connect(self._show_host)
+        host_btn.clicked.connect(lambda: self._show_panel(self._host_widget))
 
         viewer_btn = QPushButton("Viewer")
         viewer_btn.setMinimumHeight(56)
         viewer_btn.setFont(QFont("", 15, QFont.Weight.Bold))
-        viewer_btn.clicked.connect(self._show_viewer)
+        viewer_btn.clicked.connect(lambda: self._show_panel(self._viewer_widget))
 
         layout.addWidget(host_btn)
         layout.addWidget(viewer_btn)
@@ -165,7 +162,7 @@ class RoleSelectDialog(QDialog):
             "background: transparent; color: #555555; font-size: 12px; border: none; padding: 0;"
         )
         settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        settings_btn.clicked.connect(self._show_settings)
+        settings_btn.clicked.connect(lambda: self._show_panel(self._settings_widget))
 
         outer.addWidget(btn_row)
         outer.addWidget(settings_btn, 0, Qt.AlignmentFlag.AlignRight)
@@ -188,7 +185,6 @@ class RoleSelectDialog(QDialog):
         code_font.setBold(True)
         code_label.setFont(code_font)
         code_label.setStyleSheet("color: #7c3aed; letter-spacing: 4px;")
-        self._host_code_label = code_label
 
         self._copy_btn = QPushButton("⎘")
         self._copy_btn.setObjectName("copyBtn")
@@ -205,16 +201,19 @@ class RoleSelectDialog(QDialog):
         instruction.setAlignment(Qt.AlignmentFlag.AlignCenter)
         instruction.setStyleSheet("color: #888888; font-size: 13px;")
 
+        self._host_error = self._error_label()
+
         continue_btn = QPushButton("Continue")
         continue_btn.setObjectName("accent")
         continue_btn.setMinimumHeight(44)
         continue_btn.clicked.connect(self._accept_host)
 
         back_btn = QPushButton("Back")
-        back_btn.clicked.connect(self._show_choice)
+        back_btn.clicked.connect(lambda: self._show_panel(self._choice_widget))
 
         layout.addWidget(code_row)
         layout.addWidget(instruction)
+        layout.addWidget(self._host_error)
         layout.addWidget(continue_btn)
         layout.addWidget(back_btn)
         return w
@@ -226,14 +225,11 @@ class RoleSelectDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._code_input = QLineEdit()
-        self._code_input.setPlaceholderText("Enter room code")
+        self._code_input.setPlaceholderText("Enter room code (e.g. ABCD-1234)")
         self._code_input.setMinimumHeight(44)
         self._code_input.returnPressed.connect(self._accept_viewer)
 
-        self._viewer_error = QLabel("")
-        self._viewer_error.setStyleSheet("color: #ef4444; font-size: 12px;")
-        self._viewer_error.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._viewer_error.hide()
+        self._viewer_error = self._error_label()
 
         join_btn = QPushButton("Join")
         join_btn.setObjectName("accent")
@@ -241,7 +237,7 @@ class RoleSelectDialog(QDialog):
         join_btn.clicked.connect(self._accept_viewer)
 
         back_btn = QPushButton("Back")
-        back_btn.clicked.connect(self._show_choice)
+        back_btn.clicked.connect(lambda: self._show_panel(self._choice_widget))
 
         layout.addWidget(self._code_input)
         layout.addWidget(self._viewer_error)
@@ -259,13 +255,18 @@ class RoleSelectDialog(QDialog):
         label.setStyleSheet("color: #888888; font-size: 12px;")
 
         self._host_input = QLineEdit()
-        self._host_input.setPlaceholderText("e.g. myserver.partykit.dev")
+        self._host_input.setPlaceholderText("e.g. myserver.partykit.dev or ws://192.168.1.5:1999")
         self._host_input.setText(load_settings().get("partykit_host", ""))
         self._host_input.setMinimumHeight(44)
 
+        env_note = QLabel("PARTYKIT_HOST environment variable is set and overrides this value")
+        env_note.setStyleSheet("color: #f59e0b; font-size: 11px;")
+        env_note.setWordWrap(True)
+        env_note.setVisible(bool(os.environ.get("PARTYKIT_HOST", "").strip()))
+
         self._settings_status = QLabel("")
-        self._settings_status.setStyleSheet("color: #22c55e; font-size: 12px;")
         self._settings_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._settings_status.setWordWrap(True)
         self._settings_status.hide()
 
         save_btn = QPushButton("Save")
@@ -274,55 +275,44 @@ class RoleSelectDialog(QDialog):
         save_btn.clicked.connect(self._save_settings_ui)
 
         back_btn = QPushButton("Back")
-        back_btn.clicked.connect(self._show_choice)
+        back_btn.clicked.connect(lambda: self._show_panel(self._choice_widget))
 
         layout.addWidget(label)
         layout.addWidget(self._host_input)
+        layout.addWidget(env_note)
         layout.addWidget(self._settings_status)
         layout.addWidget(save_btn)
         layout.addWidget(back_btn)
         return w
 
-    def _save_settings_ui(self):
-        host = self._host_input.text().strip()
-        if host:
-            save_settings({"partykit_host": host})
-        else:
-            data = load_settings()
-            data.pop("partykit_host", None)
-            with open(get_settings_path(), "w") as f:
-                json.dump(data, f, indent=2)
-        self._settings_status.setText("Saved")
+    def _set_settings_status(self, text: str, ok: bool):
+        color = "#22c55e" if ok else "#ef4444"
+        self._settings_status.setStyleSheet(f"color: {color}; font-size: 12px;")
+        self._settings_status.setText(text)
         self._settings_status.show()
-        QTimer.singleShot(2000, self._settings_status.hide)
+        if ok:
+            QTimer.singleShot(2000, self._settings_status.hide)
 
-    def _show_settings(self):
-        self._choice_widget.hide()
-        self._host_widget.hide()
-        self._viewer_widget.hide()
-        self._settings_widget.show()
-        self.adjustSize()
+    def _save_settings_ui(self):
+        raw = self._host_input.text().strip()
+        host = normalize_host(raw) if raw else None
+        if raw and host is None:
+            self._set_settings_status("Invalid host. Use a hostname[:port] or a ws:// / wss:// URL.", False)
+            return
+        try:
+            save_settings({"partykit_host": host})
+        except OSError as e:
+            self._set_settings_status(f"Couldn't save settings: {e.strerror or e}", False)
+            return
+        if host:
+            self._host_input.setText(host)
+        self._set_settings_status("Saved", True)
 
-    def _show_choice(self):
-        self._choice_widget.show()
-        self._host_widget.hide()
-        self._viewer_widget.hide()
-        self._settings_widget.hide()
-        self.adjustSize()
-
-    def _show_host(self):
-        self._choice_widget.hide()
-        self._host_widget.show()
-        self._viewer_widget.hide()
-        self._settings_widget.hide()
-        self.adjustSize()
-
-    def _show_viewer(self):
-        self._choice_widget.hide()
-        self._host_widget.hide()
-        self._viewer_widget.show()
-        self._settings_widget.hide()
-        self._code_input.setFocus()
+    def _show_panel(self, panel):
+        for p in self._panels:
+            p.setVisible(p is panel)
+        if panel is self._viewer_widget:
+            self._code_input.setFocus()
         self.adjustSize()
 
     def _copy_code(self):
@@ -335,269 +325,270 @@ class RoleSelectDialog(QDialog):
         self._copy_btn.setText("⎘")
         self._copy_btn.setStyleSheet("")
 
+    def _server_configured(self, error_label: QLabel) -> bool:
+        if normalize_host(resolve_host() or ""):
+            return True
+        error_label.setText("Set the PartyKit host in Settings first")
+        error_label.show()
+        return False
+
     def _accept_host(self):
+        if not self._server_configured(self._host_error):
+            return
         self.role = "host"
         self.room_code = self._generated_code
         self.accept()
 
     def _accept_viewer(self):
-        code = self._code_input.text().strip().upper()
-        if not code:
-            self._viewer_error.setText("Room code required")
+        code = normalize_room_code(self._code_input.text())
+        if code is None:
+            self._viewer_error.setText("Enter a room code like ABCD-1234")
             self._viewer_error.show()
+            return
+        if not self._server_configured(self._viewer_error):
             return
         self.role = "viewer"
         self.room_code = code
         self.accept()
 
-    def closeEvent(self, event):
-        event.accept()
 
+class SyncApp(QObject):
+    """Glues the player to the PartyKit client. All state lives on the Qt GUI thread."""
 
-class _SyncBridge(QObject):
-    sync_ready = pyqtSignal(object)
+    # Emitted from the network thread; queued onto this object's (GUI) thread.
+    _net_message = pyqtSignal(object)
+    _net_status = pyqtSignal(str, bool)
 
-
-class SyncApp:
-    def __init__(self, role_hint, room_code):
-        self.role = None
+    def __init__(self, role_hint: str, room_code: str, player, client):
+        super().__init__()
+        self.role: str | None = None
         self._role_hint = role_hint
         self._room_code = room_code
-        self.video_player = None
-        self.party_client = None
-        self._app = None
-        self._loop = None
-        self._thread = None
-        self._applying_sync = False
-        self._bridge = _SyncBridge()
-        self.peer_id = None
-        self._host_peer_id = None
-        self._last_heartbeat_time = time.time()
-        self._host_disconnect_warned = False
+        self.video_player = player
+        self.party_client = client
+        self.peer_id: str | None = None
+        self._host_id: str | None = None
         self._peers: list[str] = []
-        self._last_sync: dict | None = None
+        self._last_sync: SyncState | None = None
+        self._last_host_seen = time.monotonic()
+        self._host_disconnect_warned = False
 
-    def start(self, app: QApplication):
-        self._app = app
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(HEARTBEAT_INTERVAL_MS)
+        self._heartbeat_timer.timeout.connect(self._send_heartbeat)
 
-        self.video_player = VideoPlayerWindow()
+        self._silence_timer = QTimer(self)
+        self._silence_timer.setInterval(SILENCE_CHECK_INTERVAL_MS)
+        self._silence_timer.timeout.connect(self._check_host_silence)
+
+        self._sync_debounce = QTimer(self)
+        self._sync_debounce.setSingleShot(True)
+        self._sync_debounce.setInterval(SYNC_DEBOUNCE_MS)
+        self._sync_debounce.timeout.connect(self._send_sync_state)
+
+    def start(self):
         self.video_player.set_room_code(self._room_code)
+        self.video_player.set_connection_status("Connecting…", False)
         self.video_player.show()
 
-        self.party_client = PartyKitClient(self._room_code)
+        self._net_message.connect(self._on_message)
+        self._net_status.connect(self.video_player.set_connection_status)
+        self.party_client.on_message = self._net_message.emit
+        self.party_client.on_status = self._net_status.emit
 
-        self._bridge.sync_ready.connect(self._do_apply_sync)
-        self._setup_peer_callbacks()
-        self._setup_video_signals()
-        self._start_connection()
-        self._start_stdin_thread()
-
-        return self._app
-
-    def _apply_role(self, role):
-        self.role = role
-        if role == "viewer":
-            self.video_player.set_viewer_mode()
-            self._last_heartbeat_time = time.time()
-            self._host_disconnect_warned = False
-            if self._loop:
-                self._loop.create_task(self._silence_loop())
-        else:
-            self.video_player.set_host_mode()
-            if self._loop:
-                self._loop.create_task(self._heartbeat_loop())
-
-    def _start_connection(self):
-        def run_loop():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(self._connect_async())
-
-        self._thread = threading.Thread(target=run_loop, daemon=True)
-        self._thread.start()
-
-    async def _connect_async(self):
-        try:
-            await self.party_client.connect()
-        except Exception as e:
-            print(f"[PartyKit] Connection failed: {e}")
-
-    def _setup_video_signals(self):
-        self.video_player.playRequested.connect(self._on_play)
-        self.video_player.pauseRequested.connect(self._on_pause)
-        self.video_player.seekRequested.connect(self._on_seek)
-        self.video_player.positionChanged.connect(self._on_position_changed)
+        self.video_player.playRequested.connect(self._on_local_control)
+        self.video_player.pauseRequested.connect(self._on_local_control)
+        self.video_player.seekRequested.connect(self._on_local_control)
         self.video_player.fileLoaded.connect(self._on_file_loaded)
+        self.video_player.transferRequested.connect(self._transfer_host)
+        self.video_player.closing.connect(self.stop)
 
-    def _setup_peer_callbacks(self):
-        def on_message(data):
-            msg_type = data.get("type")
+        # Provisional until the server's welcome confirms which role we actually got.
+        self._apply_role(self._role_hint)
+        self.party_client.start()
 
-            if msg_type == "welcome":
-                self.peer_id = data.get("peerId")
-                role = data.get("role")
-                if role:
-                    self._apply_role(role)
-            elif msg_type == "heartbeat" and self.role == "viewer":
-                self._last_heartbeat_time = time.time()
-                if self._host_disconnect_warned:
-                    self._host_disconnect_warned = False
-                    self.video_player.clear_warning()
-            elif msg_type == "peer_joined":
-                peer = data.get("peerId")
-                if peer and peer != self.peer_id and peer not in self._peers:
-                    self._peers.append(peer)
-                if self.role == "host":
-                    print(f"[Sync] Viewer joined: {peer}  (peers: {self._peers})")
-                    self._send_sync_state()
-            elif msg_type == "peer_left":
-                peer = data.get("peerId")
-                if peer in self._peers:
-                    self._peers.remove(peer)
-            elif msg_type == "host_changed":
-                new_host = data.get("newHostId")
-                if new_host and new_host == self.peer_id:
-                    self._apply_role("host")
-                    print("[Sync] Promoted to host")
-                else:
-                    self._host_peer_id = new_host
-            elif msg_type == "sync" and self.role == "viewer":
-                self._apply_sync(data)
+    def stop(self):
+        for timer in (self._heartbeat_timer, self._silence_timer, self._sync_debounce):
+            timer.stop()
+        self.party_client.on_message = None
+        self.party_client.on_status = None
+        self.party_client.stop()
 
-        self.party_client.set_on_message(on_message)
-        self.party_client.set_on_connect(self._on_peer_connect)
+    # --- roles -------------------------------------------------------------
 
-    def _on_peer_connect(self):
-        print("[PartyKit] Connected!")
-        if self._role_hint == "host":
+    def _apply_role(self, role: str):
+        self.role = role
+        if role == "host":
+            self.video_player.set_host_mode()
+            self._silence_timer.stop()
+            self._heartbeat_timer.start()
             self._send_sync_state()
+        else:
+            self.video_player.set_viewer_mode()
+            self._heartbeat_timer.stop()
+            self._sync_debounce.stop()
+            self._on_host_alive()  # restart the silence window and drop any stale warning
+            self._silence_timer.start()
+        self._refresh_transfer_targets()
 
-    def _on_play(self):
-        if self.role == "host" and not self._applying_sync:
-            self._send_sync_state()
+    def _refresh_transfer_targets(self):
+        peers = self._peers if self.role == "host" else []
+        self.video_player.set_transfer_targets(
+            [(f"Viewer {i + 1} · {peer[:6]}", peer) for i, peer in enumerate(peers)]
+        )
 
-    def _on_pause(self):
-        if self.role == "host" and not self._applying_sync:
-            self._send_sync_state()
+    def _transfer_host(self, target_id: str):
+        if self.role == "host" and target_id in self._peers:
+            # Our role flips when the server confirms with host_changed.
+            self.party_client.send_threadsafe({"type": "transfer_host", "targetId": target_id})
 
-    def _on_seek(self, position):
-        if self.role == "host" and not self._applying_sync:
-            self._send_sync_state()
+    # --- incoming ----------------------------------------------------------
 
-    def _on_position_changed(self, position):
-        pass
+    @pyqtSlot(object)
+    def _on_message(self, data: dict):
+        try:
+            self._dispatch(data)
+        except Exception:
+            # An exception escaping a Qt slot makes PyQt abort the whole app.
+            log.exception("Failed to handle message: %r", data)
+
+    def _dispatch(self, data: dict):
+        msg_type = data.get("type")
+
+        if msg_type == "welcome":
+            self.peer_id = data.get("peerId")
+            self._host_id = data.get("hostId")
+            peers = data.get("peers")
+            self._peers = [p for p in peers if isinstance(p, str) and p != self.peer_id] \
+                if isinstance(peers, list) else []
+            self._apply_role("host" if data.get("role") == "host" else "viewer")
+        elif msg_type == "peer_joined":
+            peer = data.get("peerId")
+            if isinstance(peer, str) and peer != self.peer_id and peer not in self._peers:
+                self._peers.append(peer)
+                self._refresh_transfer_targets()
+            if self.role == "host":
+                log.info("Viewer joined: %s", peer)
+                self._send_sync_state()
+        elif msg_type == "peer_left":
+            peer = data.get("peerId")
+            if peer in self._peers:
+                self._peers.remove(peer)
+                self._refresh_transfer_targets()
+        elif msg_type == "host_changed":
+            self._host_id = data.get("newHostId")
+            if self._host_id == self.peer_id and self.role != "host":
+                log.info("Promoted to host")
+                self._apply_role("host")
+            elif self._host_id != self.peer_id and self.role == "host":
+                log.info("Host role moved to %s", self._host_id)
+                self._apply_role("viewer")
+        elif msg_type in ("sync", "heartbeat") and self.role == "viewer":
+            if self._host_id and data.get("senderId") != self._host_id:
+                return
+            self._on_host_alive()
+            sync = parse_sync(data)
+            if sync is None:
+                log.warning("Ignoring malformed %s: %r", msg_type, data)
+                return
+            self._apply_sync(sync, force=msg_type == "sync")
+        elif msg_type == "error" and data.get("code") == "room_not_found":
+            self._host_disconnect_warned = True  # keep the silence check from overwriting this
+            self.video_player.show_warning("Room not found — waiting for the host to open it…")
+
+    def _on_host_alive(self):
+        self._last_host_seen = time.monotonic()
+        if self._host_disconnect_warned:
+            self._host_disconnect_warned = False
+            self.video_player.clear_warning()
+
+    def _check_host_silence(self):
+        if self.role != "viewer" or self._host_disconnect_warned:
+            return
+        if time.monotonic() - self._last_host_seen > HOST_SILENCE_TIMEOUT_SEC:
+            self._host_disconnect_warned = True
+            self.video_player.show_warning("Host disconnected — waiting…")
+            self.video_player.pause()
+
+    def _apply_sync(self, sync: SyncState, force: bool):
+        """force: explicit host action (always apply). Otherwise only correct real drift."""
+        self._last_sync = sync
+        self.video_player.update_host_status(sync.filename, sync.state, sync.video_time)
+        if not sync.filename or self.video_player.loaded_file is None:
+            return
+
+        now = self.party_client.clock.now(time.time())
+        target = expected_position(sync, now, self.video_player.get_duration())
+        want_playing = sync.state == "playing"
+        if not force and want_playing == self.video_player.is_playing() \
+                and not needs_correction(self.video_player.get_current_time(), target):
+            return
+
+        if want_playing:
+            self.video_player.play()
+            self.video_player.seek_to(target)
+        else:
+            self.video_player.seek_to(target)
+            self.video_player.pause()
 
     def _on_file_loaded(self):
-        if self.role == "viewer" and self._last_sync:
-            QTimer.singleShot(300, lambda: self._do_apply_sync(self._last_sync))
+        if self.role == "viewer":
+            QTimer.singleShot(FILE_LOAD_SETTLE_MS, self._resync_after_load)
 
-    async def _heartbeat_loop(self):
-        while self.role == "host":
-            if self.party_client.ws:
-                await self.party_client.broadcast({"type": "heartbeat", "wallClock": time.time()})
-            await asyncio.sleep(1.0)
-
-    async def _silence_loop(self):
-        while self.role == "viewer":
-            if time.time() - self._last_heartbeat_time > 3.0:
-                if not self._host_disconnect_warned:
-                    self._host_disconnect_warned = True
-                    self.video_player.show_warning("Host disconnected — waiting...")
-                    self.video_player.pause()
-            await asyncio.sleep(1.0)
-
-    def _send_sync_state(self):
-        if not hasattr(self.party_client, 'ws') or not self.party_client.ws:
+    def _resync_after_load(self):
+        if self.role != "viewer":
             return
+        if self._last_sync and self._last_sync.filename:
+            self._apply_sync(self._last_sync, force=True)
+        else:
+            self.video_player.pause()  # nothing to follow yet
 
-        if self.video_player._loaded_file is None:
-            return
-        current_time = self.video_player.get_current_time()
+    # --- outgoing ----------------------------------------------------------
 
-        loaded = self.video_player._loaded_file
-        msg = {
-            "type": "sync",
-            "state": "playing" if self.video_player.is_playing() else "paused",
-            "videoTime": current_time,
-            "wallClock": time.time(),
+    def _on_local_control(self, *_):
+        if self.role == "host":
+            self._sync_debounce.start()
+
+    def _state_message(self, msg_type: str) -> dict:
+        loaded = self.video_player.loaded_file
+        return {
+            "type": msg_type,
+            "state": "playing" if loaded and self.video_player.is_playing() else "paused",
+            "videoTime": self.video_player.get_current_time() if loaded else 0.0,
+            "wallClock": self.party_client.clock.now(time.time()),
             "filename": os.path.basename(loaded) if loaded else "",
         }
 
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(self.party_client.broadcast(msg), self._loop)
-        print(f"[Sync] Sent: {msg['state']} at {msg['videoTime']:.1f}s")
-
-    def _start_stdin_thread(self):
-        def read_stdin():
-            while True:
-                try:
-                    line = input()
-                except EOFError:
-                    break
-                self._handle_command(line.strip())
-
-        t = threading.Thread(target=read_stdin, daemon=True)
-        t.start()
-
-    def _handle_command(self, line: str):
-        parts = line.split()
-        if not parts:
+    def _send_sync_state(self):
+        if self.role != "host" or self.video_player.loaded_file is None:
             return
-        if parts[0] == "transfer" and len(parts) == 2:
-            if self.role != "host":
-                print("[Sync] Not host — cannot transfer")
-                return
-            target_id = parts[1]
-            msg = {"type": "transfer_host", "targetId": target_id}
-            if self._loop:
-                asyncio.run_coroutine_threadsafe(self.party_client.broadcast(msg), self._loop)
-            self.role = "viewer"
-            self.video_player.set_viewer_mode()
+        msg = self._state_message("sync")
+        if self.party_client.send_threadsafe(msg):
+            log.info("Sent: %s at %.1fs", msg["state"], msg["videoTime"])
 
-    def _apply_sync(self, msg):
-        self._bridge.sync_ready.emit(msg)
-
-    def _do_apply_sync(self, msg):
-        self._last_sync = msg
-        latency = time.time() - msg["wallClock"]
-        video_time = msg["videoTime"] + (latency if msg["state"] == "playing" else 0)
-
-        self._applying_sync = True
-        if msg["state"] == "playing":
-            self.video_player.play()
-            self.video_player.seek_to(video_time)
-        else:
-            self.video_player.seek_to(video_time)
-            self.video_player.pause()
-        self._applying_sync = False
-
-        self.video_player.update_host_status(
-            msg.get("filename", ""), msg["state"], msg["videoTime"]
-        )
+    def _send_heartbeat(self):
+        # Heartbeats carry full state so viewers can correct drift between explicit syncs.
+        if self.role == "host":
+            self.party_client.send_threadsafe(self._state_message("heartbeat"))
 
 
-def main():
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
     app = QApplication(sys.argv)
 
     dialog = RoleSelectDialog()
     if dialog.exec() != QDialog.DialogCode.Accepted:
-        sys.exit(0)
+        return 0
 
-    sync_app = SyncApp(dialog.role, dialog.room_code)
-    sync_app.start(app)
+    player = VideoPlayerWindow()
+    client = PartyKitClient(dialog.room_code, dialog.role, generate_token())
+    sync_app = SyncApp(dialog.role, dialog.room_code, player, client)
+    sync_app.start()
 
-    try:
-        ret = app.exec()
-    except KeyboardInterrupt:
-        ret = 0
-
-    if sync_app.video_player:
-        sync_app.video_player.close()
-    if sync_app.party_client and sync_app._loop:
-        sync_app._loop.call_soon_threadsafe(sync_app._loop.stop)
-
-    sys.exit(ret)
+    ret = app.exec()
+    sync_app.stop()
+    return ret
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
