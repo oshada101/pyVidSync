@@ -1,17 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
+import glob
 import os
 
 vlc_dir = os.environ.get('VLC_DIR', r'C:\Program Files\VideoLAN\VLC')
 vlc_plugins_dir = os.path.join(vlc_dir, 'plugins')
 
-import glob as _glob
-binaries = [
-    (dll, '.')
-    for dll in _glob.glob(os.path.join(vlc_dir, '*.dll'))
-]
+binaries = [(dll, '.') for dll in glob.glob(os.path.join(vlc_dir, '*.dll'))]
 
 datas = [
-    ('.env', '.'),
     (vlc_plugins_dir, 'vlc_plugins'),
 ]
 
@@ -23,9 +19,7 @@ a = Analysis(
     hiddenimports=[
         'vlc',
         'websockets',
-        'websockets.legacy',
-        'websockets.legacy.client',
-        'websockets.legacy.server',
+        'websockets.asyncio.client',
         'dotenv',
         'PyQt6',
         'PyQt6.QtWidgets',

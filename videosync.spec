@@ -1,17 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
+import glob
 import os
-from pathlib import Path
 
-vlc_lib_dir = '/usr/lib/x86_64-linux-gnu'
-vlc_plugins_dir = '/usr/lib/x86_64-linux-gnu/vlc/plugins'
+# Defaults match Debian/Ubuntu x86_64; override with VLC_LIB_DIR / VLC_PLUGINS_DIR.
+vlc_lib_dir = os.environ.get('VLC_LIB_DIR', '/usr/lib/x86_64-linux-gnu')
+vlc_plugins_dir = os.environ.get('VLC_PLUGINS_DIR', os.path.join(vlc_lib_dir, 'vlc', 'plugins'))
 
 binaries = [
-    (os.path.join(vlc_lib_dir, 'libvlc.so.5'), '.'),
-    (os.path.join(vlc_lib_dir, 'libvlccore.so.9'), '.'),
+    (lib, '.')
+    for pattern in ('libvlc.so.*', 'libvlccore.so.*')
+    for lib in glob.glob(os.path.join(vlc_lib_dir, pattern))
 ]
+if not binaries:
+    raise SystemExit(f"No libvlc found in {vlc_lib_dir}; set VLC_LIB_DIR")
 
 datas = [
-    ('.env', '.'),
     (vlc_plugins_dir, 'vlc_plugins'),
 ]
 
@@ -23,9 +26,7 @@ a = Analysis(
     hiddenimports=[
         'vlc',
         'websockets',
-        'websockets.legacy',
-        'websockets.legacy.client',
-        'websockets.legacy.server',
+        'websockets.asyncio.client',
         'dotenv',
         'PyQt6',
         'PyQt6.QtWidgets',

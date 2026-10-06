@@ -1,9 +1,19 @@
 {
   "name": "python-sync-server",
   "version": "1.0.0",
+  "private": true,
   "type": "module",
+  "scripts": {
+    "dev": "partykit dev --port 1999",
+    "deploy": "partykit deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
   "dependencies": {
-    "partysocket": "latest",
-    "partykit": "latest"
+    "partykit": "0.0.115"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
   }
 }
