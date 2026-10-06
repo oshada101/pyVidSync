@@ -18,9 +18,11 @@ pyVidSync/
 ├── partysocket_client.py  # WebSocket client for PartyKit (own asyncio thread)
 ├── sync_logic.py          # Pure helpers: room codes, URL building, sync math, clock sync
 ├── settings.py            # Settings load/save
+├── relay_server.py        # Relay server for your own VPS (single file, needs only websockets)
+├── deploy/                # systemd unit + optional Caddyfile for the VPS
 ├── tests/                 # pytest suite
 ├── party/
-│   ├── server.ts          # PartyKit server (one instance per room)
+│   ├── server.ts          # Same server for PartyKit (one instance per room)
 │   └── server.test.ts     # vitest suite
 └── partykit.json          # PartyKit configuration
 ```
@@ -38,7 +40,7 @@ npm install
 ## Quick Start (Local)
 
 ```bash
-npm run dev                          # PartyKit server on localhost:1999
+.venv/bin/python relay_server.py     # relay on localhost:1999 (or: npm run dev for PartyKit)
 PARTYKIT_HOST=localhost:1999 .venv/bin/python main.py
 ```
 
@@ -47,17 +49,40 @@ Or set the host in the app: launch → ⚙ Settings → PartyKit Host → Save.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest           # Python (stubs libvlc, no VLC install needed)
+.venv/bin/python -m pytest           # client + relay server (stubs libvlc, no VLC install needed)
 npm test && npm run typecheck        # server
 ```
 
-## Deploy to Cloud
+## Deploy to a VPS (recommended)
+
+`relay_server.py` speaks the same protocol as the PartyKit server. It's a single file with one dependency and uses about 30 MB of RAM.
+
+On the VPS (Debian/Ubuntu):
+
+```bash
+sudo apt install -y python3-venv
+sudo mkdir -p /opt/videosync
+sudo cp relay_server.py /opt/videosync/
+sudo python3 -m venv /opt/videosync/venv
+sudo /opt/videosync/venv/bin/pip install 'websockets>=14'
+sudo cp deploy/videosync-relay.service /etc/systemd/system/
+sudo systemctl enable --now videosync-relay
+```
+
+Then choose how clients reach it:
+
+- **With a domain (wss, recommended):** install Caddy, use `deploy/Caddyfile` with your domain, and open ports 80 and 443. Clients use the host `sync.yourdomain.com`.
+- **Without a domain (plain ws):** set `HOST=0.0.0.0` in the service file and open port 1999. Clients use the host `ws://<vps-ip>:1999`. Traffic is unencrypted, so room codes and host tokens are visible on the network path.
+
+Logs: `journalctl -u videosync-relay -f`.
+
+## Deploy to PartyKit (managed)
 
 ```bash
 npm run deploy
 ```
 
-Note the host from the output (e.g. `yourapp.partykit.dev`) and configure it.
+Note the host from the output (e.g. `yourapp.partykit.dev`) and configure it. As of October 2026, new deploys can fail with "exceeded the limit of 10000 Workers custom domains on zone 'partykit.dev'". That limit is on PartyKit's side; use the VPS option instead.
 
 ## Configuring the Host
 
