@@ -3,8 +3,6 @@ import os
 import sys
 import time
 
-os.environ["LIBPLACEBO_CPU"] = "1"
-
 # PyInstaller's bootloader changes the DLL search path, which breaks python-vlc's libvlc loading
 # (see 5273fa2). Reset it before vlc is imported; the rest of the path setup lives in rthook_vlc.py.
 if getattr(sys, 'frozen', False) and sys.platform == "win32":
